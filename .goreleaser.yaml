@@ -16,7 +16,7 @@ builds:
 
 kos:
   - repositories:
-      - ghcr.io/orangedrangon/local-pvc-cleaner
+      - quay.io/drangon/local-pvc-cleaner
     tags:
       - "{{.Tag}}"
       - latest
@@ -28,6 +28,4 @@ kos:
       - linux/arm64
 
 release:
-  draft: false
-  disable: false
-  skip_upload: true
+  disable: true

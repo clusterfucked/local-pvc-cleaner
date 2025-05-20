@@ -1,4 +1,4 @@
-module github.com/OrangeDrangon/local-pvc-cleaner
+module git.sr.ht/~drangon/local-pvc-cleaner
 
 go 1.24.3
 

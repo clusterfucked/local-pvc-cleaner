@@ -1,11 +1,18 @@
 { pkgs, lib, config, inputs, ... }:
-
+let
+  pkgs-unstable = import inputs.nixpkgs-unstable { system = pkgs.stdenv.system; };
+in
 {
-  packages = [ 
+  packages = [
     pkgs.gitFull
-    pkgs.goreleaser
-    pkgs.hut
+    pkgs-unstable.goreleaser
+    pkgs-unstable.hut
   ];
-  
+
+  tasks."app:release" = {
+    exec = "goreleaser release --clean";
+  };
+
   languages.go.enable = true;
+  languages.go.package = pkgs-unstable.go;
 }
