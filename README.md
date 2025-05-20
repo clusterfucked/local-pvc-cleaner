@@ -7,7 +7,7 @@ based persistent volumes on removable nodes.
 
 ## Image
 
-[quay.io/drangon/local-pvc-cleaner](quay.io/drangon/local-pvc-cleaner)
+[quay.io/drangon/local-pvc-cleaner](https://quay.io/repository/drangon/local-pvc-cleaner)
 
 ```bash
 podman pull quay.io/drangon/local-pvc-cleaner
