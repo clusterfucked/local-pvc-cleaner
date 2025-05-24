@@ -1,0 +1,9 @@
+image: nixos/unstable
+packages:
+  - nixos.devenv
+sources:
+ - https://git.sr.ht/~drangon/local-pvc-cleaner
+tasks:
+  - devenv-release: |
+      cd local-pvc-cleaner
+      devenv shell devenv tasks run app:release

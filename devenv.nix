@@ -4,7 +4,7 @@ let
 in
 {
   packages = [
-    pkgs.gitFull
+    pkgs-unstable.gitFull
     pkgs-unstable.goreleaser
     pkgs-unstable.hut
   ];
