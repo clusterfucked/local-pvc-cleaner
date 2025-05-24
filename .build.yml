@@ -1,9 +1,34 @@
-image: nixos/unstable
+image: alpine/edge
 packages:
-  - nixos.devenv
+  - nix
+secrets:
+  - f2e4a894-42a3-4657-a693-ad1acb355059
 sources:
  - https://git.sr.ht/~drangon/local-pvc-cleaner
 tasks:
+  - setup-nix: |
+      export RUNNER=$(whoami)
+      sudo addgroup $RUNNER nix
+
+      cat <<EOF | sudo tee /etc/nix/nix.conf > /dev/null
+      allowed-users = @nix
+      trusted-users = root @nix
+      build-users-group = nixbld
+      max-jobs = 4
+      EOF
+      
+      echo 'export PATH=$PATH:$HOME/.nix-profile/bin' >> .buildenv
+
+      sudo rc-update add nix-daemon
+      sudo service nix-daemon start
+  - setup-cachix: |
+      nix-env -iA cachix -f https://cachix.org/api/v1/install
+      cachix use devenv
+  - setup-devenv: |
+      nix-env --install --attr devenv -f https://github.com/NixOS/nixpkgs/tarball/nixpkgs-unstable
+  - devenv-test: |
+      cd local-pvc-cleaner
+      devenv test
   - devenv-release: |
       cd local-pvc-cleaner
       devenv shell devenv tasks run app:release

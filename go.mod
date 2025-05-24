@@ -1,6 +1,6 @@
 module git.sr.ht/~drangon/local-pvc-cleaner
 
-go 1.24.3
+go 1.24.0
 
 require (
 	k8s.io/api v0.26.5
