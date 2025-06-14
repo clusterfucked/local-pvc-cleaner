@@ -21,12 +21,12 @@ kos:
       - "{{.Tag}}"
       - latest
     bare: true
-    base_image: alpine
+    base_image: gcr.io/distroless/static-debian12:nonroot
     preserve_import_paths: false
     platforms:
       - linux/amd64
       - linux/arm64
-    user: 1000:1000
+    user: 65532:65532
 
 release:
   disable: true
