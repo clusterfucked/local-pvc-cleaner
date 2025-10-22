@@ -21,7 +21,7 @@ kos:
       - "{{.Tag}}"
       - latest
     bare: true
-    base_image: gcr.io/distroless/static-debian12:nonroot
+    base_image: gcr.io/distroless/static-debian13:nonroot
     preserve_import_paths: false
     platforms:
       - linux/amd64
