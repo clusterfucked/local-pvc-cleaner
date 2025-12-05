@@ -1,22 +1,11 @@
 image: alpine/edge
 packages:
   - nix
-  - podman
 secrets:
   - f2e4a894-42a3-4657-a693-ad1acb355059
 sources:
  - https://git.sr.ht/~drangon/local-pvc-cleaner
 tasks:
-  - setup-cgroups: |
-      sudo rc-update add cgroups
-      sudo rc-service cgroups start
-  - setup-podman: |
-      export RUNNER=$(whoami)
-      sudo modprobe tun
-      echo "tun" | sudo tee -a /etc/modules
-      echo "${RUNNER}:100000:65536" | sudo tee -a /etc/subuid
-      echo ${RUNNER}:100000:65536 | sudo tee -a /etc/subgid
-      sudo rc-service podman start
   - setup-nix: |
       export RUNNER=$(whoami)
       sudo addgroup $RUNNER nix
