@@ -16,7 +16,7 @@ builds:
 
 kos:
   - repositories:
-      # - quay.io/drangon/local-pvc-cleaner
+      - quay.io/drangon/local-pvc-cleaner
       - ghcr.io/clusterfucked/local-pvc-cleaner
     tags:
       - "{{.Tag}}"
