@@ -196,7 +196,9 @@ func (c *Controller) registerEventHandlers() error {
 				return
 			}
 			c.logger.Info("node deleted", "node", node.Name)
-			c.markNodeMissingAt(node.Name, c.now())
+			if c.cfg.NodeMissingGracePeriod > 0 {
+				c.markNodeMissingAt(node.Name, c.now())
+			}
 			c.queue.Add(node.Name)
 		},
 	}); err != nil {
@@ -251,10 +253,18 @@ func (c *Controller) onPVCChange(obj any) {
 		return
 	}
 	pvc, ok := obj.(*corev1.PersistentVolumeClaim)
-	if !ok || !c.filter.MatchesPVC(pvc) {
+	if !ok || !c.filter.NamespaceAllowed(pvc.Namespace) {
 		return
 	}
-	nodeName := c.filter.ExtractPVCNode(pvc)
+	var nodeName string
+	if c.filter.MatchesPVC(pvc) {
+		nodeName = c.filter.ExtractPVCNode(pvc)
+	}
+	if nodeName == "" && pvc.Spec.VolumeName != "" {
+		if pv, err := c.pvLister.Get(pvc.Spec.VolumeName); err == nil && c.filter.MatchesPV(pv) {
+			nodeName = c.filter.ExtractPVNode(pv)
+		}
+	}
 	if nodeName == "" {
 		return
 	}
@@ -388,6 +398,18 @@ func (c *Controller) enqueueMissingNodeCandidates() {
 	for nodeName := range candidates {
 		if !c.nodeExistsInCache(nodeName) {
 			c.queue.Add(nodeName)
+		}
+	}
+
+	c.pruneMissingSince(candidates)
+}
+
+func (c *Controller) pruneMissingSince(activeNodes map[string]struct{}) {
+	c.missingMu.Lock()
+	defer c.missingMu.Unlock()
+	for nodeName := range c.missingSince {
+		if _, active := activeNodes[nodeName]; !active {
+			delete(c.missingSince, nodeName)
 		}
 	}
 }

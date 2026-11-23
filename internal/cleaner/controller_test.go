@@ -1029,3 +1029,85 @@ func TestNamespaceFiltersIgnoreAnnotationAndSkipUnmanagedPods(t *testing.T) {
 		})
 	})
 }
+
+func TestNativeLocalPVCUnignoredReconcilesImmediately(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   "default",
+			Name:        "pvc-native-ign",
+			UID:         "uid-native-ign",
+			Annotations: map[string]string{DefaultIgnoreAnnotation: "true"},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName: "pv-native-ign",
+		},
+	}
+	pv := makePV("pv-native-ign", "node-dead", corev1.PersistentVolumeReclaimDelete, corev1.VolumeBound, &corev1.ObjectReference{
+		Namespace: "default", Name: "pvc-native-ign", UID: pvc.UID,
+	})
+	pv.Annotations = nil
+	pv.Spec.Local = &corev1.LocalVolumeSource{Path: "/mnt/disks/vol1"}
+
+	client := fake.NewSimpleClientset(pvc, pv)
+	cfg := testBaseConfig()
+	cfg.ResyncPeriod = 0
+	cfg.IncludeLocalPVs = true
+	_, metrics, _, _ := startTestController(t, client, cfg, nil)
+
+	waitUntil(t, 5*time.Second, "ignored native local pvc skipped", func() bool {
+		return strings.Contains(metrics.RenderPrometheus(), `local_pvc_cleaner_skipped_total{resource="pvc",reason="ignored"} 1`)
+	})
+
+	// Remove the ignore annotation on the PVC; onPVCChange should immediately resolve the bound PV's node and clean up.
+	updated := pvc.DeepCopy()
+	delete(updated.Annotations, DefaultIgnoreAnnotation)
+	if _, err := client.CoreV1().PersistentVolumeClaims("default").Update(context.Background(), updated, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("failed updating pvc: %v", err)
+	}
+
+	waitUntil(t, 5*time.Second, "native local pvc and pv deleted after unignoring", func() bool {
+		_, errPVC := client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "pvc-native-ign", metav1.GetOptions{})
+		_, errPV := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-native-ign", metav1.GetOptions{})
+		return apierrors.IsNotFound(errPVC) && apierrors.IsNotFound(errPV)
+	})
+}
+
+func TestMissingSincePrunedAndSkippedWhenGracePeriodZero(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-ephemeral"}}
+	pvc := makePVC("default", "pvc-eph", "node-ephemeral", "pv-eph", nil)
+	pv := makePV("pv-eph", "node-ephemeral", corev1.PersistentVolumeReclaimDelete, corev1.VolumeBound, &corev1.ObjectReference{
+		Namespace: "default", Name: "pvc-eph", UID: pvc.UID,
+	})
+
+	client := fake.NewSimpleClientset(node, pvc, pv)
+	cfg := testBaseConfig()
+	cfg.NodeMissingGracePeriod = 0
+	ctrl, _, _, _ := startTestController(t, client, cfg, nil)
+
+	if err := client.CoreV1().Nodes().Delete(context.Background(), "node-ephemeral", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("failed deleting node: %v", err)
+	}
+
+	waitUntil(t, 5*time.Second, "volumes deleted after node deletion", func() bool {
+		_, errPVC := client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "pvc-eph", metav1.GetOptions{})
+		_, errPV := client.CoreV1().PersistentVolumes().Get(context.Background(), "pv-eph", metav1.GetOptions{})
+		return apierrors.IsNotFound(errPVC) && apierrors.IsNotFound(errPV)
+	})
+
+	ctrl.missingMu.Lock()
+	count := len(ctrl.missingSince)
+	ctrl.missingMu.Unlock()
+	if count != 0 {
+		t.Fatalf("expected missingSince to remain empty when grace period is 0, got %d entries", count)
+	}
+
+	// Verify pruneMissingSince clears stale entries during sweeps.
+	ctrl.markNodeMissingAt("node-stale", time.Now())
+	ctrl.enqueueMissingNodeCandidates()
+	ctrl.missingMu.Lock()
+	_, exists := ctrl.missingSince["node-stale"]
+	ctrl.missingMu.Unlock()
+	if exists {
+		t.Fatalf("expected stale missingSince entry to be pruned")
+	}
+}

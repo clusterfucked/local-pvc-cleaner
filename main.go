@@ -199,7 +199,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	var (
-		leaderWG       sync.WaitGroup
+		leaderMu       sync.Mutex
+		leaderStopped  bool
+		leaderDone     chan struct{}
 		lostLeadership atomic.Bool
 	)
 
@@ -213,8 +215,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Name:            cfg.LeaseName,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(leadCtx context.Context) {
-				leaderWG.Add(1)
-				defer leaderWG.Done()
+				leaderMu.Lock()
+				if leaderStopped {
+					leaderMu.Unlock()
+					return
+				}
+				done := make(chan struct{})
+				leaderDone = done
+				leaderMu.Unlock()
+				defer close(done)
 
 				logger.Info("acquired leadership", "identity", cfg.PodName, "lease", cfg.LeaseName, "namespace", cfg.PodNamespace)
 				metrics.SetLeader(true)
@@ -248,6 +257,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		logger.Error("failed to initialize leader elector", "error", err)
 		return 1
 	}
+	if healthzAdaptor != nil {
+		healthzAdaptor.SetLeaderElection(le)
+	}
 
 	logger.Info("starting leader election",
 		"identity", cfg.PodName,
@@ -257,7 +269,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	)
 
 	le.Run(runCtx)
-	leaderWG.Wait()
+	leaderMu.Lock()
+	leaderStopped = true
+	done := leaderDone
+	leaderMu.Unlock()
+	if done != nil {
+		<-done
+	}
 
 	if err := getFatalErr(); err != nil {
 		logger.Error("exiting due to fatal error", "error", err)
