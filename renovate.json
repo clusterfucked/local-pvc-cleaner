@@ -1,0 +1,30 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "local>clusterfucked/renovate-config"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track pinned container base image digest in .ko.yaml",
+      "managerFilePatterns": [
+        "/^\\.ko\\.yaml$/"
+      ],
+      "matchStrings": [
+        "defaultBaseImage:\\s*(?<depName>[^\\s@]+)@(?<currentDigest>sha256:[a-f0-9]{64})\\s+#\\s*\\S+:(?<currentValue>\\S+)"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "k8s.io/**"
+      ],
+      "groupName": "k8s.io packages"
+    }
+  ]
+}
