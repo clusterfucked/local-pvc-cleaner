@@ -21,7 +21,7 @@ When a node disappears and will never come back:
    - **Orphaned PVs via `NodeAffinity`:** Matches PVs pinned to a single node via `spec.nodeAffinity.required.nodeSelectorTerms` using `--hostname-topology-keys` (`kubernetes.io/hostname`, `topology.kubernetes.io/hostname`). A PV is only matched when every term constrains it unambiguously to the exact same single node.
    - **Generic ephemeral volumes:** Tracks Pods referencing both standard `persistentVolumeClaim` volumes and generic `ephemeral` volumes (`<pod-name>-<volume-name>`).
 4. **Safeguards & cleanup order (`Pod` → `PVC` → `PV`):**
-   - Before deleting anything for a PVC, the controller checks the opt-out annotation (`local-pvc-cleaner.io/ignore: "true"`) on the PVC, its bound PV, and every referencing Pod, as well as `--skip-unmanaged-pods`. If any safeguard triggers, the entire PVC cleanup is skipped so the PVC is never left stuck in `Terminating` behind a skipped Pod.
+   - Before deleting anything for a PVC, the controller checks the opt-out annotation (`local-pvc-cleaner.kmr.pw/ignore: "true"`) on the PVC, its bound PV, and every referencing Pod, as well as `--skip-unmanaged-pods`. If any safeguard triggers, the entire PVC cleanup is skipped so the PVC is never left stuck in `Terminating` behind a skipped Pod.
    - Resources are deleted in order: referencing **Pods** first, then the **PVC**, then the bound **PV** (and any remaining orphaned PVs pinned to the missing node).
    - **`Retain` reclaim policy:** PVs with `persistentVolumeReclaimPolicy: Retain` are skipped by default (emitting a `SkippedRetainedPV` event). Set `--delete-retained-pvs=true` to delete them as well.
 
@@ -112,7 +112,7 @@ Inspect controller logs (`kubectl -n local-pvc-cleaner logs -l app.kubernetes.io
 | `--skip-unmanaged-pods` | `false` | Skip cleaning a PVC if any referencing Pod has no `OwnerReferences`. |
 | `--include-namespaces` | `""` | Comma-separated allowlist of namespaces to manage (empty allows all). |
 | `--exclude-namespaces` | `""` | Comma-separated denylist of namespaces to ignore. |
-| `--ignore-annotation` | `local-pvc-cleaner.io/ignore` | Annotation key that opts a PVC, PV, or Pod out of cleanup when set to `"true"` (empty disables). |
+| `--ignore-annotation` | `local-pvc-cleaner.kmr.pw/ignore` | Annotation key that opts a PVC, PV, or Pod out of cleanup when set to `"true"` (empty disables). |
 | `--kube-qps` | `20` | Maximum QPS to the Kubernetes API server. |
 | `--kube-burst` | `40` | Maximum burst for throttling requests to the Kubernetes API server. |
 | `--log-level` | `info` | Log verbosity level: `debug`, `info`, `warn`, `error`. |
@@ -129,12 +129,12 @@ Inspect controller logs (`kubectl -n local-pvc-cleaner logs -l app.kubernetes.io
 
 ### Opting Out Individual Resources
 
-Add the annotation `local-pvc-cleaner.io/ignore: "true"` (or the custom key set via `--ignore-annotation`) to any `PersistentVolumeClaim`, `PersistentVolume`, or referencing `Pod` to opt it out of cleanup:
+Add the annotation `local-pvc-cleaner.kmr.pw/ignore: "true"` (or the custom key set via `--ignore-annotation`) to any `PersistentVolumeClaim`, `PersistentVolume`, or referencing `Pod` to opt it out of cleanup:
 
 ```yaml
 metadata:
   annotations:
-    local-pvc-cleaner.io/ignore: "true"
+    local-pvc-cleaner.kmr.pw/ignore: "true"
 ```
 
 If set on a bound `PV` or referencing `Pod`, cleanup of the associated `PVC` is also skipped so the workload is not left partially deleted.

@@ -13,7 +13,7 @@ import (
 const (
 	DefaultLeaseName        = "local-pvc-cleaner"
 	DefaultProvisioner      = "rancher.io/local-path"
-	DefaultIgnoreAnnotation = "local-pvc-cleaner.io/ignore"
+	DefaultIgnoreAnnotation = "local-pvc-cleaner.kmr.pw/ignore"
 )
 
 // DefaultHostnameTopologyKeys are the standard Kubernetes node topology label keys
