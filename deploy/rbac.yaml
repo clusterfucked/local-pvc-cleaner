@@ -1,0 +1,93 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: local-pvc-cleaner-leader-election
+  namespace: local-pvc-cleaner
+  labels:
+    app.kubernetes.io/name: local-pvc-cleaner
+rules:
+  # Kubernetes RBAC does not evaluate resourceNames on create requests, so
+  # creating the Lease initially requires an unscoped create rule.
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - create
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    resourceNames:
+      - local-pvc-cleaner
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: local-pvc-cleaner-leader-election
+  namespace: local-pvc-cleaner
+  labels:
+    app.kubernetes.io/name: local-pvc-cleaner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: local-pvc-cleaner-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: local-pvc-cleaner
+    namespace: local-pvc-cleaner
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: local-pvc-cleaner
+  labels:
+    app.kubernetes.io/name: local-pvc-cleaner
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumes
+      - persistentvolumeclaims
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: local-pvc-cleaner
+  labels:
+    app.kubernetes.io/name: local-pvc-cleaner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: local-pvc-cleaner
+subjects:
+  - kind: ServiceAccount
+    name: local-pvc-cleaner
+    namespace: local-pvc-cleaner

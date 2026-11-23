@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-pvc-cleaner
+  namespace: local-pvc-cleaner
+  labels:
+    app.kubernetes.io/name: local-pvc-cleaner
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: local-pvc-cleaner
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: local-pvc-cleaner
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: local-pvc-cleaner
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: local-pvc-cleaner
+                    app.kubernetes.io/component: controller
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: local-pvc-cleaner
+          # Pin to a release tag or digest in production (e.g. :v1.0.0).
+          # Mirror registry: ghcr.io/clusterfucked/local-pvc-cleaner
+          image: quay.io/drangon/local-pvc-cleaner:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --leader-election=true
+            - --lease-name=local-pvc-cleaner
+            - --metrics-bind-address=:8080
+            - --log-format=json
+            # Optional flags (uncomment to customize):
+            # - --dry-run=true
+            # - --node-missing-grace-period=1m
+            # - --exclude-namespaces=kube-system
+            # - --provisioners=rancher.io/local-path
+            # - --include-local-pvs=true
+            # - --delete-retained-pvs=false
+            # - --skip-unmanaged-pods=false
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
