@@ -2,219 +2,330 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	"k8s.io/client-go/tools/record"
+
+	"github.com/clusterfucked/local-pvc-cleaner/internal/cleaner"
 )
-
-const (
-	selectedNodeAnnotation   = "volume.kubernetes.io/selected-node"
-	provisionerAnnotation    = "volume.kubernetes.io/storage-provisioner"
-	expectedProvisionerValue = "rancher.io/local-path"
-	pvcByNodeIndex           = "pvcByNode"
-	podByPvcIndex            = "podByPvc"
-	lockName                 = "local-pvc-cleaner"
-)
-
-var (
-	id        = os.Getenv("POD_NAME")
-	namespace = os.Getenv("POD_NAMESPACE")
-)
-
-func deleteVolumes(ctx context.Context, clientset *kubernetes.Clientset, factory informers.SharedInformerFactory, pvc *corev1.PersistentVolumeClaim) {
-	err := clientset.CoreV1().PersistentVolumeClaims(pvc.Namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{})
-	if err != nil {
-		fmt.Printf("failed to delete pvc(%s): %v\n", pvc.Name, err)
-		return
-	}
-	fmt.Printf("deleted pvc(%s)\n", pvc.Name)
-
-	pvName := pvc.Spec.VolumeName
-	if pvName == "" {
-		fmt.Printf("pvc(%s) is not bound to a volume\n", pvc.Name)
-		return
-	}
-
-	err = clientset.CoreV1().PersistentVolumes().Delete(ctx, pvName, metav1.DeleteOptions{})
-	if err != nil {
-		fmt.Printf("failed to delete pv(%s): %v\n", pvName, err)
-		return
-	}
-
-	fmt.Printf("deleted pv(%s)\n", pvName)
-
-	pods, err := factory.Core().V1().Pods().Informer().GetIndexer().ByIndex(podByPvcIndex, pvc.Name)
-	if err != nil {
-		fmt.Printf("error getting pods from index: %v\n", err)
-		return
-	}
-
-	for _, podAny := range pods {
-		pod := podAny.(*corev1.Pod)
-		err = clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
-		if err != nil {
-			fmt.Printf("failed to delete pod(%s): %v\n", pod.Name, err)
-			continue
-		}
-
-		fmt.Printf("deleted pod(%s)\n", pod.Name)
-	}
-}
-
-func cleanupVolumesByNode(ctx context.Context, clientset *kubernetes.Clientset, nodeName string, factory informers.SharedInformerFactory) {
-	persistentVolumeClaims, err := factory.Core().V1().PersistentVolumeClaims().Informer().GetIndexer().ByIndex(pvcByNodeIndex, nodeName)
-	if err != nil {
-		fmt.Printf("error getting pvc from index: %v\n", err)
-		return
-	}
-	for _, pvcAny := range persistentVolumeClaims {
-		pvc := pvcAny.(*corev1.PersistentVolumeClaim)
-		deleteVolumes(ctx, clientset, factory, pvc)
-	}
-}
 
 func main() {
-	// kubeconfig or in-cluster
-	var config *rest.Config
-	var err error
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
 
-	if id == "" || namespace == "" {
-		panic(fmt.Errorf("required to set id(%s) and namespace(%s)", id, namespace))
+func run(args []string, stdout, stderr io.Writer) int {
+	cfg := cleaner.DefaultConfig()
+	fs := flag.NewFlagSet("local-pvc-cleaner", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	cfg.RegisterFlags(fs)
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
 	}
 
-	kubeConfig := os.Getenv("KUBECONFIG")
-	if kubeConfig != "" {
-		config, err = clientcmd.BuildConfigFromFlags("", kubeConfig)
-	} else {
-		config, err = rest.InClusterConfig()
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(stderr, "invalid configuration: %v\n", err)
+		return 1
 	}
+
+	logger, err := newLogger(cfg.LogLevel, cfg.LogFormat, stdout)
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(stderr, "failed to configure logger: %v\n", err)
+		return 1
 	}
+	slog.SetDefault(logger)
 
-	clientset, err := kubernetes.NewForConfig(config)
+	restCfg, err := buildRestConfig(cfg)
 	if err != nil {
-		panic(err)
+		logger.Error("failed to build kubernetes client config", "error", err)
+		return 1
 	}
 
-	factory := informers.NewSharedInformerFactory(clientset, 0)
+	clientset, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		logger.Error("failed to create kubernetes clientset", "error", err)
+		return 1
+	}
 
-	podInformer := factory.Core().V1().Pods().Informer()
-	podInformer.AddIndexers(cache.Indexers{
-		podByPvcIndex: func(obj any) ([]string, error) {
-			pod := obj.(*corev1.Pod)
-			pvcs := make([]string, 0, len(pod.Spec.Volumes))
-			for _, volume := range pod.Spec.Volumes {
-				if volume.PersistentVolumeClaim == nil {
-					continue
-				}
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stopSignals()
 
-				claimName := volume.PersistentVolumeClaim.ClaimName
-				if claimName == "" {
-					continue
-				}
-				pvcs = append(pvcs, claimName)
+	runCtx, cancelRun := context.WithCancel(sigCtx)
+	defer cancelRun()
+
+	metrics := cleaner.NewMetrics()
+
+	var healthzAdaptor *leaderelection.HealthzAdaptor
+	var healthzCheck func(*http.Request) error
+	if cfg.LeaderElection {
+		healthzAdaptor = leaderelection.NewLeaderHealthzAdaptor(20 * time.Second)
+		healthzCheck = healthzAdaptor.Check
+	}
+
+	var (
+		fatalMu  sync.Mutex
+		fatalErr error
+	)
+	setFatalErr := func(err error) {
+		if err == nil {
+			return
+		}
+		fatalMu.Lock()
+		if fatalErr == nil {
+			fatalErr = err
+		}
+		fatalMu.Unlock()
+		cancelRun()
+	}
+	getFatalErr := func() error {
+		fatalMu.Lock()
+		defer fatalMu.Unlock()
+		return fatalErr
+	}
+
+	var httpServer *http.Server
+	var httpWG sync.WaitGroup
+	if strings.TrimSpace(cfg.MetricsBindAddress) != "" {
+		listener, err := net.Listen("tcp", cfg.MetricsBindAddress)
+		if err != nil {
+			logger.Error("failed to bind metrics/health HTTP server", "address", cfg.MetricsBindAddress, "error", err)
+			return 1
+		}
+		httpServer = &http.Server{
+			Handler:           metrics.NewHTTPHandler(cfg.LeaderElection, healthzCheck),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		httpWG.Add(1)
+		go func() {
+			defer httpWG.Done()
+			logger.Info("starting HTTP server", "address", listener.Addr().String())
+			if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("HTTP server stopped unexpectedly", "error", err)
+				setFatalErr(fmt.Errorf("metrics/health HTTP server failed: %w", err))
 			}
+		}()
+	}
 
-			return pvcs, nil
-		},
-	})
+	shutdownHTTP := func() {
+		if httpServer == nil {
+			return
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("HTTP server graceful shutdown failed", "error", err)
+		}
+		httpWG.Wait()
+	}
+	defer shutdownHTTP()
 
-	pvcInformer := factory.Core().V1().PersistentVolumeClaims().Informer()
-	pvcInformer.AddIndexers(cache.Indexers{
-		pvcByNodeIndex: func(obj any) ([]string, error) {
-			pvc := obj.(*corev1.PersistentVolumeClaim)
-			if pvc.Annotations[provisionerAnnotation] != expectedProvisionerValue {
-				return nil, nil
-			}
+	var recorder record.EventRecorder
+	if !cfg.DryRun {
+		broadcaster := record.NewBroadcaster()
+		broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{
+			Interface: clientset.CoreV1().Events(""),
+		})
+		defer broadcaster.Shutdown()
+		recorder = broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{
+			Component: "local-pvc-cleaner",
+		})
+	}
 
-			return []string{pvc.Annotations[selectedNodeAnnotation]}, nil
-		},
-	})
+	runController := func(ctx context.Context) error {
+		ctrl, err := cleaner.NewController(cleaner.Options{
+			Client:   clientset,
+			Config:   cfg,
+			Logger:   logger,
+			Metrics:  metrics,
+			Recorder: recorder,
+		})
+		if err != nil {
+			return fmt.Errorf("create controller: %w", err)
+		}
+		return ctrl.Run(ctx)
+	}
 
-	nodeInformer := factory.Core().V1().Nodes().Informer()
-	nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		DeleteFunc: func(obj any) {
-			node := obj.(*corev1.Node)
-			fmt.Printf("node deleted: %s\n", node.Name)
-			cleanupVolumesByNode(context.TODO(), clientset, node.Name, factory)
-		},
-	})
+	metrics.SetInitialized(true)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer cancel()
+	if !cfg.LeaderElection {
+		logger.Info("starting controller without leader election", "dry_run", cfg.DryRun)
+		metrics.SetLeader(true)
+		if err := runController(runCtx); err != nil && sigCtx.Err() == nil {
+			setFatalErr(err)
+		}
+		metrics.SetLeader(false)
+		if err := getFatalErr(); err != nil {
+			logger.Error("controller exited with error", "error", err)
+			return 1
+		}
+		logger.Info("controller shut down cleanly")
+		return 0
+	}
 
 	lock := &resourcelock.LeaseLock{
 		LeaseMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      "local-pvc-cleaner",
+			Namespace: cfg.PodNamespace,
+			Name:      cfg.LeaseName,
 		},
 		Client: clientset.CoordinationV1(),
 		LockConfig: resourcelock.ResourceLockConfig{
-			Identity: id,
+			Identity: cfg.PodName,
 		},
 	}
 
-	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
-		Lock:          lock,
-		LeaseDuration: time.Second * 15,
-		RenewDeadline: time.Second * 10,
-		RetryPeriod:   time.Second * 2,
+	var (
+		leaderWG       sync.WaitGroup
+		lostLeadership atomic.Bool
+	)
+
+	le, err := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
+		Lock:            lock,
+		ReleaseOnCancel: true,
+		LeaseDuration:   cfg.LeaseDuration,
+		RenewDeadline:   cfg.RenewDeadline,
+		RetryPeriod:     cfg.RetryPeriod,
+		WatchDog:        healthzAdaptor,
+		Name:            cfg.LeaseName,
 		Callbacks: leaderelection.LeaderCallbacks{
-			OnStartedLeading: func(ctx context.Context) {
-				fmt.Printf("me(%s) started leading...\n", id)
-				factory.Start(ctx.Done())
-				factory.WaitForCacheSync(ctx.Done())
+			OnStartedLeading: func(leadCtx context.Context) {
+				leaderWG.Add(1)
+				defer leaderWG.Done()
 
-				pvcs, err := factory.Core().V1().PersistentVolumeClaims().Lister().List(labels.Everything())
-				if err != nil {
-					fmt.Printf("failed to list pvcs: %v\n", err)
-					cancel()
-					return
-				}
-
-				for _, pvc := range pvcs {
-					if pvc.Annotations[provisionerAnnotation] != expectedProvisionerValue {
-						continue
-					}
-
-					nodeName := pvc.Annotations[selectedNodeAnnotation]
-					_, exists, err := factory.Core().V1().Nodes().Informer().GetStore().GetByKey(nodeName)
-					if err != nil {
-						fmt.Printf("failed to get node(%s) from pvc(%s): %v\n", nodeName, pvc.Name, err)
-						cancel()
-						return
-					}
-
-					if exists {
-						fmt.Printf("node(%s) does exist in store from pvc(%s)\n", nodeName, pvc.Name)
-						continue
-					}
-
-					fmt.Printf("node(%s) does not exist in store from pvc(%s)\n", nodeName, pvc.Name)
-					deleteVolumes(ctx, clientset, factory, pvc)
+				logger.Info("acquired leadership", "identity", cfg.PodName, "lease", cfg.LeaseName, "namespace", cfg.PodNamespace)
+				metrics.SetLeader(true)
+				if err := runController(leadCtx); err != nil && sigCtx.Err() == nil {
+					logger.Error("controller stopped with fatal error", "error", err)
+					setFatalErr(err)
 				}
 			},
 			OnStoppedLeading: func() {
-				fmt.Printf("me(%s) stopped leading...\n", id)
-				cancel()
+				metrics.SetLeader(false)
+				metrics.SetSynced(false)
+				if sigCtx.Err() != nil {
+					logger.Info("released leadership due to shutdown signal", "identity", cfg.PodName)
+					return
+				}
+				if getFatalErr() == nil {
+					logger.Error("lost leadership unexpectedly", "identity", cfg.PodName)
+					lostLeadership.Store(true)
+					cancelRun()
+				}
 			},
 			OnNewLeader: func(identity string) {
-				fmt.Printf("new leader(%s)\n", identity)
+				if identity == cfg.PodName {
+					return
+				}
+				logger.Info("observed new leader", "leader", identity, "identity", cfg.PodName)
 			},
 		},
 	})
+	if err != nil {
+		logger.Error("failed to initialize leader elector", "error", err)
+		return 1
+	}
+
+	logger.Info("starting leader election",
+		"identity", cfg.PodName,
+		"lease", cfg.LeaseName,
+		"namespace", cfg.PodNamespace,
+		"dry_run", cfg.DryRun,
+	)
+
+	le.Run(runCtx)
+	leaderWG.Wait()
+
+	if err := getFatalErr(); err != nil {
+		logger.Error("exiting due to fatal error", "error", err)
+		return 1
+	}
+	if lostLeadership.Load() {
+		logger.Error("exiting due to unexpected leadership loss")
+		return 1
+	}
+	logger.Info("controller shut down cleanly")
+	return 0
+}
+
+func newLogger(levelStr, format string, w io.Writer) (*slog.Logger, error) {
+	level, err := cleaner.ParseLogLevel(levelStr)
+	if err != nil {
+		return nil, err
+	}
+	opts := &slog.HandlerOptions{Level: level}
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "json":
+		return slog.New(slog.NewJSONHandler(w, opts)), nil
+	case "text":
+		return slog.New(slog.NewTextHandler(w, opts)), nil
+	default:
+		return nil, fmt.Errorf("invalid log format %q", format)
+	}
+}
+
+func buildRestConfig(cfg cleaner.Config) (*rest.Config, error) {
+	var (
+		restCfg *rest.Config
+		err     error
+	)
+
+	if strings.TrimSpace(cfg.Kubeconfig) != "" {
+		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+		loadingRules.ExplicitPath = cfg.Kubeconfig
+		restCfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			loadingRules,
+			&clientcmd.ConfigOverrides{},
+		).ClientConfig()
+	} else if strings.TrimSpace(os.Getenv(clientcmd.RecommendedConfigPathEnvVar)) != "" {
+		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+		restCfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			loadingRules,
+			&clientcmd.ConfigOverrides{},
+		).ClientConfig()
+	} else {
+		restCfg, err = rest.InClusterConfig()
+		if err != nil {
+			loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+			kubeCfg, kubeErr := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+				loadingRules,
+				&clientcmd.ConfigOverrides{},
+			).ClientConfig()
+			if kubeErr != nil {
+				return nil, fmt.Errorf("in-cluster config unavailable (%v) and kubeconfig fallback failed (%w)", err, kubeErr)
+			}
+			restCfg = kubeCfg
+			err = nil
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	restCfg.QPS = float32(cfg.KubeQPS)
+	restCfg.Burst = cfg.KubeBurst
+	return restCfg, nil
 }
