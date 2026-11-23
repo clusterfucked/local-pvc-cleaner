@@ -1,4 +1,4 @@
-module git.sr.ht/~drangon/local-pvc-cleaner
+module github.com/clusterfucked/local-pvc-cleaner
 
 go 1.27.0
 
