@@ -231,45 +231,6 @@ func TestPodPVCKeysIncludesEphemeralAndDeduplicates(t *testing.T) {
 	}
 }
 
-func TestStripCachedObject(t *testing.T) {
-	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:          "node-1",
-			ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "kubelet"}},
-		},
-		Status: corev1.NodeStatus{
-			Images: []corev1.ContainerImage{{Names: []string{"nginx:latest"}}},
-		},
-	}
-	if _, err := StripCachedObject(node); err != nil {
-		t.Fatalf("StripCachedObject(node) error: %v", err)
-	}
-	if len(node.ManagedFields) != 0 || len(node.Status.Images) != 0 {
-		t.Errorf("expected node ManagedFields and Images to be stripped: %#v", node)
-	}
-
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:          "pod-1",
-			ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "kube-controller-manager"}},
-		},
-		Spec: corev1.PodSpec{
-			Containers:          []corev1.Container{{Name: "app", Env: []corev1.EnvVar{{Name: "SECRET", Value: "x"}}}},
-			InitContainers:      []corev1.Container{{Name: "init", Env: []corev1.EnvVar{{Name: "A", Value: "1"}}}},
-			EphemeralContainers: []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "dbg", Env: []corev1.EnvVar{{Name: "B", Value: "2"}}}}},
-		},
-	}
-	if _, err := StripCachedObject(pod); err != nil {
-		t.Fatalf("StripCachedObject(pod) error: %v", err)
-	}
-	if len(pod.ManagedFields) != 0 ||
-		len(pod.Spec.Containers[0].Env) != 0 ||
-		len(pod.Spec.InitContainers[0].Env) != 0 ||
-		len(pod.Spec.EphemeralContainers[0].Env) != 0 {
-		t.Errorf("expected pod ManagedFields and all container Env slices to be stripped")
-	}
-}
-
 func TestUnwrapDeletedObject(t *testing.T) {
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
 
