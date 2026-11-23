@@ -1,0 +1,11 @@
+defaultBaseImage: gcr.io/distroless/static-debian13@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5 # gcr.io/distroless/static-debian13:nonroot
+
+builds:
+  - id: local-pvc-cleaner
+    main: .
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
